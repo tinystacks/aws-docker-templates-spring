@@ -1,25 +1,28 @@
 package com.tinystacks.model;
 
+import java.util.UUID;
+
 public class LocalItem {
 
-	private Integer id;
+	private String id;
 	private String title;
 	private String content;
 
 	public LocalItem() {
 	}
 
-	public LocalItem(Integer id, String title, String content) {
-		this.id= id;
+	public LocalItem(String id, String title, String content) {
+		UUID uuid = UUID.randomUUID();
+		this.id= uuid.toString();
 		this.title = title;
 		this.content = content;
 	}
 
-	public void setId(Integer id) {
+	public void setId(String id) {
 		this.id = id;
 	}
 
-	public Integer getId() {
+	public String getId() {
 		return id;
 	}
 
