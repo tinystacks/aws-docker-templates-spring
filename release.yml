@@ -6,8 +6,37 @@ phases:
       - docker pull $ECR_IMAGE_URL:$PREVIOUS_STAGE_NAME
       - docker tag $ECR_IMAGE_URL:$PREVIOUS_STAGE_NAME $ECR_IMAGE_URL:$STAGE_NAME
       - docker push $ECR_IMAGE_URL:$STAGE_NAME
+      - |
+        if [ ! -z "$REGIONAL_ECR_ENDPOINT" -a ! -z "$REGIONAL_ECR_IMAGE_URL" ];
+          then
+            docker login -u AWS -p $(aws ecr get-login-password --region $STAGE_REGION) $REGIONAL_ECR_ENDPOINT
+            docker tag $ECR_IMAGE_URL:$PREVIOUS_STAGE_NAME $REGIONAL_ECR_IMAGE_URL:$STAGE_NAME
+            docker push $REGIONAL_ECR_IMAGE_URL:$STAGE_NAME
+        fi
   post_build:
     on-failure: CONTINUE
     commands:
-      - region="${STAGE_REGION:-$AWS_REGION}"
-      - if [ -z "$SERVICE_NAME" ] || [ "$SERVICE_NAME" == "placeholder" ]; then echo 'Service is not ready yet. Repository tagged correctly, exiting now'; else  aws ecs update-service --service $SERVICE_NAME --cluster $CLUSTER_ARN --region $region --force-new-deployment; fi
+      - region="${STAGE_REGION:-$AWS_REGION}" 
+      - |
+        if [ ! -z "$LAMBDA_FUNCTION_NAME" -a  "$LAMBDA_FUNCTION_NAME" != "placeholder" ];
+          then
+            imageUrl="${REGIONAL_ECR_IMAGE_URL:-$ECR_IMAGE_URL}" 
+            aws lambda update-function-code --function-name "$LAMBDA_FUNCTION_NAME" --image-uri "$imageUrl:$STAGE_NAME" --region $region
+            imageSha=$(docker images --no-trunc --quiet $imageUrl:$PREVIOUS_STAGE_NAME);
+            aws lambda tag-resource --resource "$LAMBDA_FUNCTION_ARN" --tags "IMAGE_SHA=$imageSha" --region $region
+          else
+            echo 'Not a serverless stage'
+            if [ -z "$SERVICE_NAME" ] || [ "$SERVICE_NAME" == "placeholder" ];
+              then
+                echo 'Service is not ready yet. Repository tagged correctly, exiting now';
+              else
+                TASK_ARN=$(aws ecs describe-services --cluster $CLUSTER_ARN --services $SERVICE_NAME | jq -r '.services[].taskDefinition') 
+                TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition  "$TASK_ARN" | jq -r '.taskDefinition')
+                CONTAINER_DEFINITIONS=$(jq -r '.containerDefinitions' <<< $TASK_DEFINITION)
+                FAMILY=$(jq -r '.family' <<< $TASK_DEFINITION)
+                COMMIT_SHA=$ECR_IMAGE_URL:$(git rev-parse HEAD)    
+                UPDATED_CONTAINER=$(echo $CONTAINER_DEFINITIONS | jq --arg COMMIT_SHA "$COMMIT_SHA" 'map(.image = $COMMIT_SHA)')
+                NEW_DEF_ARN=$(aws ecs register-task-definition --family "$FAMILY" --container-definitions "$UPDATED_CONTAINER" --task-role-arn $TASK_ROLE_ARN --network-mode awsvpc | jq -r '.taskDefinition.taskDefinitionArn')
+                aws ecs update-service --service $SERVICE_NAME --cluster $CLUSTER_ARN --task-definition "$NEW_DEF_ARN" --force-new-deployment
+            fi
+        fi
